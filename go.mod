@@ -1,4 +1,4 @@
-module github.com/negbie/go-baresip
+module github.com/MariusSchiffer/go-baresip
 
 go 1.16
 
