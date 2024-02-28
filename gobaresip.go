@@ -1,71 +1,5 @@
 package gobaresip
 
-/*
-#cgo linux LDFLAGS: ${SRCDIR}/libbaresip/baresip/libbaresip.a
-#cgo linux LDFLAGS: ${SRCDIR}/libbaresip/re/libre.a
-#cgo linux LDFLAGS: ${SRCDIR}/libbaresip/rem/librem.a
-#cgo linux LDFLAGS: ${SRCDIR}/libbaresip/opus/libopus.a
-#cgo linux LDFLAGS: ${SRCDIR}/libbaresip/openssl/libssl.a
-#cgo linux LDFLAGS: ${SRCDIR}/libbaresip/openssl/libcrypto.a
-#cgo linux LDFLAGS: -ldl -lm
-
-#include <stdint.h>
-#include <stdlib.h>
-#include <libbaresip/re/include/re.h>
-#include <libbaresip/rem/include/rem.h>
-#include <libbaresip/baresip/include/baresip.h>
-
-static void signal_handler(int sig)
-{
-	static bool term = false;
-
-	if (term) {
-		module_app_unload();
-		mod_close();
-		exit(0);
-	}
-
-	term = true;
-
-	info("terminated by signal %d\n", sig);
-
-	ua_stop_all(false);
-}
-
-static void net_change_handler(void *arg)
-{
-	(void)arg;
-
-	info("IP-address changed: %j\n",
-	     net_laddr_af(baresip_network(), AF_INET));
-
-	(void)uag_reset_transp(true, true);
-}
-
-static void set_net_change_handler()
-{
-	net_change(baresip_network(), 60, net_change_handler, NULL);
-}
-
-static void ua_exit_handler(void *arg)
-{
-	(void)arg;
-	debug("ua exited -- stopping main runloop\n");
-
-	//The main run-loop can be stopped now
-	re_cancel();
-}
-
-static void set_ua_exit_handler()
-{
-	uag_set_exit_handler(ua_exit_handler, NULL);
-}
-
-int mainLoop(){
-	return re_main(signal_handler);
-}
-*/
-import "C"
 import (
 	"bytes"
 	"fmt"
@@ -77,7 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"github.com/goccy/go-json"
 )
@@ -168,13 +101,12 @@ func New(options ...func(*Baresip) error) (*Baresip, error) {
 		})
 		go http.ListenAndServe(b.wsAddr, nil)
 	}
-
-	if err := b.setup(); err != nil {
-		return nil, err
+	if err := b.connectCtrl(); err != nil {
+		return b, err
 	}
 
 	// Simple solution for this https://github.com/baresip/baresip/issues/584
-	go b.keepActive()
+	//go b.keepActive()
 
 	return b, nil
 }
@@ -193,7 +125,7 @@ func (b *Baresip) connectCtrl() error {
 	return nil
 }
 
-func (b *Baresip) read() {
+func (b *Baresip) Read() {
 	for {
 		if atomic.LoadUint32(&b.ctrlConnAlive) == 0 {
 			break
@@ -319,117 +251,3 @@ func (b *Baresip) keepActive() {
 	}
 }
 
-// setup a baresip instance
-func (b *Baresip) setup() error {
-
-	ua := C.CString(b.userAgent)
-	defer C.free(unsafe.Pointer(ua))
-
-	C.sys_coredump_set(1)
-
-	err := C.libre_init()
-	if err != 0 {
-		log.Printf("libre init failed with error code %d\n", err)
-		return b.end(err)
-	}
-
-	if b.debug {
-		C.log_enable_stdout(1)
-	} else {
-		C.log_enable_stdout(0)
-	}
-
-	if b.configPath != "" {
-		cp := C.CString(b.configPath)
-		defer C.free(unsafe.Pointer(cp))
-		C.conf_path_set(cp)
-	}
-
-	err = C.conf_configure()
-	if err != 0 {
-		log.Printf("baresip configure failed with error code %d\n", err)
-		return b.end(err)
-	}
-
-	// Top-level baresip struct init must be done AFTER configuration is complete.
-	err = C.baresip_init(C.conf_config())
-	if err != 0 {
-		log.Printf("baresip main init failed with error code %d\n", err)
-		return b.end(err)
-	}
-
-	if b.audioPath != "" {
-		ap := C.CString(b.audioPath)
-		defer C.free(unsafe.Pointer(ap))
-		C.play_set_path(C.baresip_player(), ap)
-	}
-
-	err = C.ua_init(ua, 1, 1, 1)
-	if err != 0 {
-		log.Printf("baresip ua init failed with error code %d\n", err)
-		return b.end(err)
-	}
-
-	C.set_net_change_handler()
-	C.set_ua_exit_handler()
-
-	err = C.conf_modules()
-	if err != 0 {
-		log.Printf("baresip load modules failed with error code %d\n", err)
-		return b.end(err)
-	}
-
-	if b.debug {
-		C.log_enable_debug(1)
-		C.uag_enable_sip_trace(1)
-	} else {
-		C.log_enable_debug(0)
-		C.uag_enable_sip_trace(0)
-	}
-
-	/*
-		ua_eprm := C.CString("")
-		defer C.free(unsafe.Pointer(ua_eprm))
-		err = C.uag_set_extra_params(ua_eprm)
-	*/
-
-	if err := b.connectCtrl(); err != nil {
-		b.end(1)
-		return err
-	}
-
-	return nil
-}
-
-// Run a baresip instance
-func (b *Baresip) Run() error {
-	go b.read()
-	err := b.end(C.mainLoop())
-	if err.Error() == "0" {
-		return nil
-	}
-	return err
-}
-
-func (b *Baresip) end(err C.int) error {
-	if err != 0 {
-		C.ua_stop_all(1)
-	}
-
-	C.ua_close()
-	C.module_app_unload()
-	C.conf_close()
-
-	C.baresip_close()
-
-	// Modules must be unloaded after all application activity has stopped.
-	C.mod_close()
-
-	C.libre_close()
-
-	// Check for memory leaks
-	C.tmr_debug()
-	C.mem_debug()
-
-	return fmt.Errorf("%d", err)
-}
